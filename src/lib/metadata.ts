@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 
 const SITE_NAME = "トレード検証ラボ";
-const SITE_URL = "https://trade-kencho-lab.com";
+const SITE_URL = "https://trade-kensyo-lab.jp";
 const SITE_DESCRIPTION =
   "個人トレーダーのための実務支援メディア。取引の記録・計算・振り返り・改善をツールとノウハウで支援します。FX・CFD・株価指数・暗号資産など幅広い市場に対応。";
 
