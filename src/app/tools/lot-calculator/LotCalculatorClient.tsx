@@ -13,6 +13,7 @@ import {
   Scissors,
   BarChart3,
   Info,
+  RefreshCw,
 } from "lucide-react";
 import Breadcrumbs from "@/components/Breadcrumbs";
 import DisclaimerBox from "@/components/DisclaimerBox";
@@ -55,6 +56,8 @@ interface FormState {
   slPrice: number;
   conversionRate: number;
   cfdPointValue: number;
+  /** XAUUSD only: ounces per lot (1 | 10 | 100) */
+  xauOzPerLot: number;
 }
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -135,6 +138,7 @@ const DEFAULT_FORM: FormState = {
   slPrice: 149.75,
   conversionRate: 150,
   cfdPointValue: 1,
+  xauOzPerLot: 1,
 };
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -149,6 +153,14 @@ interface ConversionInfo {
 }
 
 function getConversionInfo(accountCurrency: AccountCurrency, pair: PairCode): ConversionInfo {
+  // XAUUSD is priced in USD — JPY accounts need a USDJPY rate to convert pip value
+  if (pair === "XAUUSD" && accountCurrency === "JPY") {
+    return {
+      needed: true,
+      label: "1 USD = ? JPY　換算レート（USDJPY）",
+      defaultRate: CONVERSION_DEFAULTS["USD-JPY"] ?? 150,
+    };
+  }
   if (isCFD(pair)) return { needed: false, label: "", defaultRate: 1 };
   const quote = PAIR_QUOTE[pair] ?? "USD";
   if (quote === accountCurrency) return { needed: false, label: "", defaultRate: 1 };
@@ -204,12 +216,12 @@ const FAQ_ITEMS: FAQItem[] = [
   {
     question: "換算レートはなぜ必要ですか？",
     answer:
-      "口座通貨と、取引銘柄の損益が発生する通貨が異なる場合、損益を口座通貨に換算する必要があるためです。\n\nたとえば、日本円口座でEURUSDを取引する場合、損益は主にUSD建てで計算されるため、USDJPY換算レートが必要になります。\n\nこのツールでは自動取得ではなく手入力で換算レートを入力する仕様です。取引時のレートを確認して入力してください。",
+      "口座通貨と、取引銘柄の損益が発生する通貨が異なる場合、損益を口座通貨に換算する必要があるためです。\n\nたとえば、日本円口座でEURUSDを取引する場合、損益は主にUSD建てで計算されるため、USDJPY換算レートが必要になります。\n\n「自動取得」ボタンを押すと、外部APIからリアルタイムのレートを取得して自動入力できます。また、手動で任意のレートを入力することも可能です。",
   },
   {
     question: "XAUUSDやBTCUSDも正確に計算できますか？",
     answer:
-      "XAUUSDやBTCUSDも計算できますが、注意が必要です。\n\nCFD銘柄は、ブローカーによって1lotあたりの価値や最小変動単位が異なる場合があります。\n\nそのため、CFD銘柄を選ぶ場合は「1lotあたり1pointの損益」をご利用の取引環境に合わせて入力してください。",
+      "XAUUSDとBTCUSDも計算できますが、ブローカーによって仕様が異なる点に注意が必要です。\n\n【XAUUSD（ゴールド）について】\nXAUUSDは、ブローカーによって1lotあたりのオンス数が異なります。主な種類は以下の3種類です。\n\n・1 lot = 1 oz（一部の業者）\n・1 lot = 10 oz\n・1 lot = 100 oz（標準的な仕様）\n\nこのツールでXAUUSDを選ぶと「1lotあたりのオンス数」を選択できるようになり、1pointあたりの損益が自動で計算されます。JPY口座の場合はUSDJPYの換算レートも入力してください。\n\n【BTCUSDについて】\nBTCUSDは「1lotあたり1pointの損益」をご利用のブローカーのコントラクトスペックで確認して手動入力してください。",
   },
   {
     question: "JP225・US100・US500にも対応していますか？",
@@ -243,8 +255,8 @@ const COMMON_MISTAKES = [
     desc: "FX通貨ペアはpips、XAUUSD・BTCUSD・JP225などのCFD銘柄はpointsで計算します。単位を間違えるとロット数が大きくズレます。",
   },
   {
-    title: "CFD銘柄の1point価値を確認しない",
-    desc: "CFDの1lotあたり1pointの損益はブローカーによって異なります。取引前にコントラクトスペックで必ず確認してください。",
+    title: "CFD銘柄のロット仕様を確認しない",
+    desc: "XAUUSDは業者によって1lotが1oz・10oz・100ozと異なります。このツールではオンス数を選択すると自動計算しますが、BTCUSDなど他のCFDは1pointあたりの損益をコントラクトスペックで確認して入力してください。",
   },
   {
     title: "許容リスク率を高くしすぎる",
@@ -270,6 +282,34 @@ interface Props {
 
 export default function LotCalculatorClient({ relatedArticles }: Props) {
   const [form, setForm] = useState<FormState>(DEFAULT_FORM);
+  const [rateLoading, setRateLoading] = useState(false);
+  const [rateError, setRateError] = useState<string | null>(null);
+
+  async function fetchConversionRate() {
+    // Determine which currency pair to fetch (quote currency → account currency)
+    const fromCurrency =
+      form.pair === "XAUUSD" ? "USD" : (PAIR_QUOTE[form.pair] ?? "USD");
+    const toCurrency = form.accountCurrency;
+
+    setRateLoading(true);
+    setRateError(null);
+    try {
+      const res = await fetch(
+        `https://api.frankfurter.app/latest?from=${fromCurrency}&to=${toCurrency}`,
+        { signal: AbortSignal.timeout(8000) }
+      );
+      if (!res.ok) throw new Error("response error");
+      const data = await res.json() as { rates: Record<string, number> };
+      const rate = data.rates[toCurrency];
+      if (!rate) throw new Error("rate not found");
+      setForm((prev) => ({ ...prev, conversionRate: parseFloat(rate.toFixed(4)) }));
+      setRateError(null);
+    } catch {
+      setRateError("自動取得に失敗しました。手動で入力してください。");
+    } finally {
+      setRateLoading(false);
+    }
+  }
 
   const isCfd = isCFD(form.pair);
   const unit = getUnit(form.pair);
@@ -301,7 +341,18 @@ export default function LotCalculatorClient({ relatedArticles }: Props) {
     ? fxPipValueInQuote * form.conversionRate
     : fxPipValueInQuote;
 
-  const pipValuePerLot = isCfd ? form.cfdPointValue : fxPipValuePerLot;
+  // XAUUSD: 1 point = $0.01 per oz. Auto-derive point value from oz/lot + currency conversion.
+  const xauPointValue =
+    form.pair === "XAUUSD"
+      ? form.xauOzPerLot * pipSize * (conversionInfo.needed ? form.conversionRate : 1)
+      : 0;
+
+  const pipValuePerLot =
+    form.pair === "XAUUSD"
+      ? xauPointValue
+      : isCfd
+      ? form.cfdPointValue
+      : fxPipValuePerLot;
 
   const result = calculateLot({
     accountBalance: clampNumber(form.accountBalance, 0, 1_000_000_000),
@@ -312,7 +363,10 @@ export default function LotCalculatorClient({ relatedArticles }: Props) {
   });
 
   const lotTypeShort = lotDef?.label.split("：")[0] ?? "スタンダード";
-  const lotBasisLabel = `1 lot = ${lotCurrencyAmount.toLocaleString()}通貨`;
+  const lotBasisLabel =
+    form.pair === "XAUUSD"
+      ? `1 lot = ${form.xauOzPerLot} oz`
+      : `1 lot = ${lotCurrencyAmount.toLocaleString()}通貨`;
 
   function setNum(key: keyof FormState) {
     return (e: React.ChangeEvent<HTMLInputElement>) =>
@@ -415,22 +469,34 @@ export default function LotCalculatorClient({ relatedArticles }: Props) {
               </p>
             </div>
 
-            {/* ④ 1ロットの通貨量 */}
-            <div>
-              <FieldLabel num={4} label="1lotあたりの通貨量" />
-              <select
-                value={form.lotTypeKey}
-                onChange={setStr("lotTypeKey")}
-                className={inputCls}
-              >
-                {LOT_TYPES.map((lt) => (
-                  <option key={lt.value} value={lt.value}>{lt.label}</option>
-                ))}
-              </select>
-              <p className="text-xs text-slate-400 mt-1.5 leading-relaxed">
-                1 lot あたりの通貨量は取引環境・口座タイプによって異なる場合があります。ご利用の口座仕様に合わせて選択してください。
-              </p>
-            </div>
+            {/* ④ 1ロットの通貨量（XAUUSDは固定表示） */}
+            {form.pair === "XAUUSD" ? (
+              <div>
+                <FieldLabel num={4} label="1lotあたりの通貨量" />
+                <div className={`${inputCls} bg-slate-50 text-slate-500 cursor-default select-none`}>
+                  ※ XAUUSD のロット単位はオンス（oz）で管理します
+                </div>
+                <p className="text-xs text-slate-400 mt-1.5 leading-relaxed">
+                  オンス数は下記の「1lotあたりのオンス数（XAUUSD）」で設定してください。
+                </p>
+              </div>
+            ) : (
+              <div>
+                <FieldLabel num={4} label="1lotあたりの通貨量" />
+                <select
+                  value={form.lotTypeKey}
+                  onChange={setStr("lotTypeKey")}
+                  className={inputCls}
+                >
+                  {LOT_TYPES.map((lt) => (
+                    <option key={lt.value} value={lt.value}>{lt.label}</option>
+                  ))}
+                </select>
+                <p className="text-xs text-slate-400 mt-1.5 leading-relaxed">
+                  1 lot あたりの通貨量は取引環境・口座タイプによって異なる場合があります。ご利用の口座仕様に合わせて選択してください。
+                </p>
+              </div>
+            )}
 
             {/* ⑤ 許容リスク率 */}
             <div>
@@ -515,8 +581,41 @@ export default function LotCalculatorClient({ relatedArticles }: Props) {
               )}
             </div>
 
-            {/* ⑦ CFD: 1lotあたり1pointの損益 */}
-            {isCfd && (
+            {/* ⑦ XAUUSD: oz/lot セレクター + 自動計算 */}
+            {form.pair === "XAUUSD" && (
+              <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 space-y-3">
+                <div className="flex items-start gap-2">
+                  <Info className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                  <p className="text-xs text-amber-700">
+                    XAUUSDは業者によって1lotあたりのオンス数が異なります。ご利用のブローカーの契約仕様を選択してください。
+                  </p>
+                </div>
+                <div>
+                  <FieldLabel num={7} label="1lotあたりのオンス数（XAUUSD）" />
+                  <select
+                    value={form.xauOzPerLot}
+                    onChange={(e) => setForm((prev) => ({ ...prev, xauOzPerLot: parseFloat(e.target.value) }))}
+                    className={inputCls}
+                  >
+                    <option value={1}>1 lot = 1 oz（一部業者）</option>
+                    <option value={10}>1 lot = 10 oz</option>
+                    <option value={100}>1 lot = 100 oz（標準）</option>
+                  </select>
+                </div>
+                <div className="bg-white border border-amber-200 rounded-lg px-3 py-2 text-xs text-amber-700 font-medium">
+                  自動計算された1point損益：
+                  <strong className="ml-1">
+                    {xauPointValue.toLocaleString(undefined, { maximumFractionDigits: 4 })} {currencySymbol}
+                  </strong>
+                  <span className="text-amber-500 font-normal ml-1">
+                    （{form.xauOzPerLot} oz × 0.01{conversionInfo.needed ? ` × ${form.conversionRate} USDJPY` : ""}）
+                  </span>
+                </div>
+              </div>
+            )}
+
+            {/* ⑦ 非XAUUSD CFD: 1lotあたり1pointの損益 */}
+            {isCfd && form.pair !== "XAUUSD" && (
               <div className="bg-amber-50 border border-amber-200 rounded-xl p-4">
                 <div className="flex items-start gap-2 mb-3">
                   <Info className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
@@ -542,25 +641,45 @@ export default function LotCalculatorClient({ relatedArticles }: Props) {
               </div>
             )}
 
-            {/* ⑦ FX: 換算レート（必要な場合のみ） */}
-            {!isCfd && conversionInfo.needed && (
+            {/* ⑦ FX / XAUUSD-JPY: 換算レート（必要な場合のみ） */}
+            {conversionInfo.needed && (!isCfd || form.pair === "XAUUSD") && (
               <div className="bg-amber-50 border border-amber-200 rounded-xl p-4">
                 <div className="flex items-start gap-2 mb-2">
                   <Info className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
                   <p className="text-xs text-amber-700">
-                    口座通貨（{form.accountCurrency}）と{form.pair}の決済通貨（{PAIR_QUOTE[form.pair]}）が異なるため、換算レートが必要です。
+                    {form.pair === "XAUUSD"
+                      ? "XAUUSDはUSD建て価格のため、JPY口座で計算するにはUSDJPYの換算レートが必要です。"
+                      : `口座通貨（${form.accountCurrency}）と${form.pair}の決済通貨（${PAIR_QUOTE[form.pair]}）が異なるため、換算レートが必要です。`
+                    }
                   </p>
                 </div>
-                <FieldLabel num={7} label={conversionInfo.label} />
-                <input
-                  type="number"
-                  value={form.conversionRate}
-                  onChange={setNum("conversionRate")}
-                  min={0.000001}
-                  step="0.001"
-                  className={inputCls}
-                />
-                <p className="text-xs text-slate-400 mt-1">自動取得はされません。現在のレートを手動で入力してください。</p>
+                <FieldLabel num={form.pair === "XAUUSD" ? 8 : 7} label={conversionInfo.label} />
+                {/* Input + 自動取得ボタン */}
+                <div className="flex gap-2">
+                  <input
+                    type="number"
+                    value={form.conversionRate}
+                    onChange={setNum("conversionRate")}
+                    min={0.000001}
+                    step="0.001"
+                    className={`${inputCls} flex-1`}
+                  />
+                  <button
+                    type="button"
+                    onClick={fetchConversionRate}
+                    disabled={rateLoading}
+                    className="flex items-center gap-1.5 whitespace-nowrap px-3 py-2 rounded-lg border border-amber-300 bg-white hover:bg-amber-50 text-amber-700 text-xs font-medium transition-colors disabled:opacity-60 disabled:cursor-wait"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 shrink-0 ${rateLoading ? "animate-spin" : ""}`} />
+                    {rateLoading ? "取得中..." : "自動取得"}
+                  </button>
+                </div>
+                {rateError && (
+                  <p className="text-xs text-red-500 mt-1">{rateError}</p>
+                )}
+                <p className="text-xs text-slate-400 mt-1">
+                  「自動取得」でリアルタイムレートを反映できます。手動入力も可能です。
+                </p>
               </div>
             )}
           </div>
@@ -616,13 +735,19 @@ export default function LotCalculatorClient({ relatedArticles }: Props) {
               />
               <ResultRow label="想定損失額（丸め後）" value={`${result.actualLoss.toLocaleString()} ${currencySymbol}`} />
               <ResultRow label="ロット基準" value={lotBasisLabel} />
-              {isCfd && (
+              {form.pair === "XAUUSD" && (
+                <ResultRow
+                  label="1pointあたり損益（XAUUSD）"
+                  value={`${xauPointValue.toLocaleString(undefined, { maximumFractionDigits: 4 })} ${currencySymbol}`}
+                />
+              )}
+              {isCfd && form.pair !== "XAUUSD" && (
                 <ResultRow label="1lotあたり1pointの損益" value={`${form.cfdPointValue} ${currencySymbol}`} />
               )}
-              {!isCfd && conversionInfo.needed && (
+              {conversionInfo.needed && (
                 <ResultRow
                   label="使用換算レート"
-                  value={`1 ${PAIR_QUOTE[form.pair]} = ${form.conversionRate} ${form.accountCurrency}`}
+                  value={`1 ${form.pair === "XAUUSD" ? "USD" : (PAIR_QUOTE[form.pair] ?? "USD")} = ${form.conversionRate} ${form.accountCurrency}`}
                 />
               )}
             </div>
