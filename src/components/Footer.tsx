@@ -44,6 +44,15 @@ export default function Footer() {
             <p className="text-xs text-slate-400 leading-relaxed mb-4">
               個人トレーダーの記録・検証・改善をサポートするメディアです。実際に役立つ情報・ツールを提供します。
             </p>
+            <p className="text-xs text-slate-400 leading-relaxed mb-4">
+              関連サイト：
+              <a
+                href="https://mogwatch.jp/v2/policy-rates"
+                className="text-slate-300 underline hover:text-white transition-colors"
+              >
+                政策金利一覧・利上げ確率（MogWatch）
+              </a>
+            </p>
             <div className="flex items-center gap-3">
               <a href="/contact" aria-label="お問い合わせ" className="text-slate-400 hover:text-white transition-colors">
                 <Mail className="w-4 h-4" />
